@@ -1,3 +1,4 @@
+import json
 import os
 
 import pandas as pd
@@ -5,6 +6,7 @@ from outbreak_data import authenticate_user, outbreak_data as od
 from outbreak_tools import crumbs
 
 OUTPUT_DIR = 'validated'
+CACHE_FILE = '.api_cache.json'
 
 #authenticate_user.authenticate_new_user()
 lineage_key = crumbs.get_alias_key()
@@ -14,6 +16,39 @@ _ldm_cache: dict[str, set[str]] = {}
 _lineage_prev_cache: dict[tuple, tuple[float, float]] = {}
 _pm_cache: dict[tuple, float] = {}
 _pml_cache: dict[tuple, float] = {}
+
+
+def _load_caches() -> None:
+    if not os.path.isfile(CACHE_FILE):
+        return
+    with open(CACHE_FILE) as f:
+        data = json.load(f)
+    for k, v in data.get('ldm', {}).items():
+        _ldm_cache[k] = set(v)
+    for k, v in data.get('lineage_prev', {}).items():
+        _lineage_prev_cache[tuple(json.loads(k))] = tuple(v)
+    for k, v in data.get('pm', {}).items():
+        parts = json.loads(k)
+        _pm_cache[(frozenset(parts[0]), parts[1], parts[2])] = v
+    for k, v in data.get('pml', {}).items():
+        parts = json.loads(k)
+        _pml_cache[(frozenset(parts[0]), parts[1], parts[2], parts[3])] = v
+    print(f'Loaded cache from {CACHE_FILE}')
+
+
+def _save_caches() -> None:
+    data = {
+        'ldm': {k: sorted(v) for k, v in _ldm_cache.items()},
+        'lineage_prev': {json.dumps(list(k)): list(v) for k, v in _lineage_prev_cache.items()},
+        'pm': {json.dumps([sorted(k[0]), k[1], k[2]]): v for k, v in _pm_cache.items()},
+        'pml': {json.dumps([sorted(k[0]), k[1], k[2], k[3]]): v for k, v in _pml_cache.items()},
+    }
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(data, f)
+    print(f'Saved cache to {CACHE_FILE}')
+
+
+_load_caches()
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
@@ -211,3 +246,5 @@ for file in sorted(os.listdir('samples')):
     out_name = file.replace('initial_', 'validated_')
     pd.DataFrame(rows).to_csv(f'{OUTPUT_DIR}/{out_name}', index=True)
     print(f'  → {OUTPUT_DIR}/{out_name}')
+
+_save_caches()

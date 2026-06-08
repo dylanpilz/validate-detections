@@ -2,6 +2,7 @@ import json
 import os
 
 import pandas as pd
+import yaml
 from outbreak_data import authenticate_user, outbreak_data as od
 from outbreak_tools import crumbs
 
@@ -11,11 +12,28 @@ CACHE_FILE = '.api_cache.json'
 #authenticate_user.authenticate_new_user()
 lineage_key = crumbs.get_alias_key()
 
+# ── barcode + lineage hierarchy (local, no API) ───────────────────────────────
+
+_barcodes = pd.read_feather('usher_barcodes.feather').set_index('index')
+
+with open('lineages.yml') as f:
+    _lineage_list = yaml.safe_load(f)
+
+_parent_of: dict = {}
+_children_of: dict = {}
+for _e in _lineage_list:
+    _n = _e['name']
+    _p = _e.get('parent')
+    _parent_of[_n] = _p
+    _children_of.setdefault(_n, [])
+    if _p:
+        _children_of.setdefault(_p, []).append(_n)
+
 # ── per-run caches ────────────────────────────────────────────────────────────
-_ldm_cache: dict[str, set[str]] = {}
-_lineage_prev_cache: dict[tuple, tuple[float, float]] = {}
-_pm_cache: dict[tuple, float] = {}
-_pml_cache: dict[tuple, float] = {}
+_ldm_cache: dict = {}
+_lineage_prev_cache: dict = {}
+_pm_cache: dict = {}
+_pml_cache: dict = {}
 
 
 def _load_caches() -> None:
@@ -23,8 +41,6 @@ def _load_caches() -> None:
         return
     with open(CACHE_FILE) as f:
         data = json.load(f)
-    for k, v in data.get('ldm', {}).items():
-        _ldm_cache[k] = set(v)
     for k, v in data.get('lineage_prev', {}).items():
         _lineage_prev_cache[tuple(json.loads(k))] = tuple(v)
     for k, v in data.get('pm', {}).items():
@@ -38,7 +54,6 @@ def _load_caches() -> None:
 
 def _save_caches() -> None:
     data = {
-        'ldm': {k: sorted(v) for k, v in _ldm_cache.items()},
         'lineage_prev': {json.dumps(list(k)): list(v) for k, v in _lineage_prev_cache.items()},
         'pm': {json.dumps([sorted(k[0]), k[1], k[2]]): v for k, v in _pm_cache.items()},
         'pml': {json.dumps([sorted(k[0]), k[1], k[2], k[3]]): v for k, v in _pml_cache.items()},
@@ -51,21 +66,47 @@ def _save_caches() -> None:
 _load_caches()
 
 
-# ── API helpers ───────────────────────────────────────────────────────────────
+# ── LDM helpers (barcode-based) ───────────────────────────────────────────────
 
 def to_pango(lineage: str) -> str:
     return lineage.removesuffix('.X')
 
 
-def get_ldms(pango_lin: str) -> set[str]:
-    """Lineage-defining aa_mutations from outbreak API (freq ≥ 0.8 in lineage)."""
-    if pango_lin not in _ldm_cache:
-        df = od.lineage_mutations(pango_lin=pango_lin, descendants=True, lineage_key=lineage_key)
-        _ldm_cache[pango_lin] = set(df.index.to_list())
-    return _ldm_cache[pango_lin]
+def _get_all_descendants(pango_lin: str) -> set:
+    result, queue = set(), [pango_lin]
+    while queue:
+        node = queue.pop()
+        result.add(node)
+        queue.extend(_children_of.get(node, []))
+    return result
 
 
-def get_lineage_prevalence(pango_lin: str, datemin: str, datemax: str) -> tuple[float, float]:
+def _barcode_muts(lineage: str) -> set:
+    if lineage not in _barcodes.index:
+        return set()
+    row = _barcodes.loc[lineage]
+    return set(row.index[row == 1.0])
+
+
+def get_ldms(pango_lin: str) -> set:
+    """Union of barcode mutations across pango_lin and all descendants, minus parent mutations."""
+    if pango_lin in _ldm_cache:
+        return _ldm_cache[pango_lin]
+
+    descendants = _get_all_descendants(pango_lin)
+    muts = set().union(*(_barcode_muts(d) for d in descendants))
+
+    parent = _parent_of.get(pango_lin)
+    if parent:
+        muts -= _barcode_muts(parent)
+
+    _ldm_cache[pango_lin] = muts
+    return muts
+
+
+# ── API helpers ───────────────────────────────────────────────────────────────
+
+def get_lineage_prevalence(pango_lin: str, datemin: str, datemax: str) -> tuple:
     """Returns (p_lineage, lineage_count_sum) for Bayes computation."""
     key = (pango_lin, datemin, datemax)
     if key not in _lineage_prev_cache:
@@ -79,16 +120,17 @@ def get_lineage_prevalence(pango_lin: str, datemin: str, datemax: str) -> tuple[
     return _lineage_prev_cache[key]
 
 
-def get_p_mutations(muts: list[str], datemin: str, datemax: str) -> float:
+def get_p_mutations(muts: list, datemin: str, datemax: str) -> float:
     """P(M) — overall prevalence of this mutation set across all lineages."""
     key = (frozenset(muts), datemin, datemax)
     if key not in _pm_cache:
-        df = od.lineage_cl_prevalence(
-            '.', descendants=True, mutations=muts, location='USA',
-            datemin=datemin, datemax=datemax, lineage_key=lineage_key,
-        )
-        tc = float(df['total_count'].sum())
-        _pm_cache[key] = float(df['lineage_count'].sum()) / tc if tc > 0 else 0.0
+        return 0.0 
+        # df = od.lineage_cl_prevalence(
+        #     '.', descendants=True, mutations=muts, location='USA',
+        #     datemin=datemin, datemax=datemax, lineage_key=lineage_key,
+        # )
+        # tc = float(df['total_count'].sum())
+        # _pm_cache[key] = float(df['lineage_count'].sum()) / tc if tc > 0 else 0.0
     return _pm_cache[key]
 
 
@@ -99,7 +141,7 @@ def _multiquery_to_df(data: dict) -> pd.DataFrame:
 
 
 def get_p_mutations_given_lineage(
-    muts: list[str], pango_lin: str, lineage_count: float, datemin: str, datemax: str,
+    muts: list, pango_lin: str, lineage_count: float, datemin: str, datemax: str,
 ) -> float:
     """P(M|L) — fraction of lineage-L sequences that carry this mutation set."""
     key = (frozenset(muts), pango_lin, datemin, datemax)
@@ -118,15 +160,19 @@ def get_p_mutations_given_lineage(
 
 # ── covar cluster utilities ───────────────────────────────────────────────────
 
-def parse_aa_muts(aa_mutations_val) -> list[str]:
-    """
-    Parse aa_mutations cell from covar TSV into a deduplicated list.
-    Keeps only tokens that contain ':' (valid GENE:CHANGE format).
-    """
+def parse_nt_muts(nt_mutations_val) -> list:
+    """Parse nt_mutations cell from covar TSV into a deduplicated list."""
+    return list(dict.fromkeys(
+        m for m in str(nt_mutations_val).split() if m and m != 'nan'
+    ))
+
+
+def parse_aa_muts(aa_mutations_val) -> list:
+    """Parse aa_mutations cell from covar TSV into a deduplicated list."""
     return list(dict.fromkeys(m.lower() for m in str(aa_mutations_val).split() if ':' in m))
 
 
-def count_lineage_clusters(covariants: pd.DataFrame, ldm_set: set[str]) -> dict[str, int]:
+def count_lineage_clusters(covariants: pd.DataFrame, ldm_set: set) -> dict:
     counts = {
         'n_clusters_1_ldm': 0,
         'cluster_depth_1_ldm': 0,
@@ -134,8 +180,8 @@ def count_lineage_clusters(covariants: pd.DataFrame, ldm_set: set[str]) -> dict[
         'cluster_depth_2plus_ldm': 0,
     }
     for _, row in covariants.iterrows():
-        aa_muts = parse_aa_muts(row.get('aa_mutations', ''))
-        n_ldm = sum(1 for m in aa_muts if m in ldm_set)
+        nt_muts = parse_nt_muts(row.get('nt_mutations', ''))
+        n_ldm = sum(1 for m in nt_muts if m in ldm_set)
         if n_ldm == 0:
             continue
         depth = int(row['cluster_depth'])
@@ -150,7 +196,7 @@ def count_lineage_clusters(covariants: pd.DataFrame, ldm_set: set[str]) -> dict[
 
 def bayes_lineage_probability(
     covariants: pd.DataFrame,
-    ldm_set: set[str],
+    ldm_set: set,
     pango_lin: str,
     p_lineage: float,
     lineage_count: float,
@@ -171,8 +217,12 @@ def bayes_lineage_probability(
     total_depth = 0
 
     for _, row in covariants.iterrows():
+        nt_muts = parse_nt_muts(row.get('nt_mutations', ''))
+        if not nt_muts or not any(m in ldm_set for m in nt_muts):
+            continue
+
         aa_muts = parse_aa_muts(row.get('aa_mutations', ''))
-        if not aa_muts or not any(m in ldm_set for m in aa_muts):
+        if not aa_muts:
             continue
 
         depth = int(row['cluster_depth'])

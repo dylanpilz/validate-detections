@@ -100,6 +100,16 @@ def get_ldms(pango_lin: str) -> set:
     if parent:
         muts -= _barcode_muts(parent)
 
+    # Exclude mutations that appear in any lineage outside this clade (convergent evolution)
+    if muts:
+        outside_clade = [lin for lin in _barcodes.index if lin not in descendants]
+        clade_cols = [m for m in muts if m in _barcodes.columns]
+        if outside_clade and clade_cols:
+            sub = _barcodes.loc[outside_clade, clade_cols]
+            convergent = set(sub.columns[(sub == 1.0).any()])
+            muts -= convergent
+
+    print("len LDMs:", muts)
     _ldm_cache[pango_lin] = muts
     return muts
 
@@ -154,6 +164,7 @@ def get_p_mutations_given_lineage(
         )
         resp = od.requests.get(url, headers=od._get_user_authentication())
         df = _multiquery_to_df(resp.json())
+        
         _pml_cache[key] = float(df['lineage_count'].sum()) / lineage_count if lineage_count > 0 else 0.0
     return _pml_cache[key]
 
@@ -213,9 +224,8 @@ def bayes_lineage_probability(
     if covariants.empty or p_lineage <= 0:
         return float('nan')
 
-    weighted_sum = 0.0
-    total_depth = 0
 
+    res = []
     for _, row in covariants.iterrows():
         nt_muts = parse_nt_muts(row.get('nt_mutations', ''))
         if not nt_muts or not any(m in ldm_set for m in nt_muts):
@@ -234,15 +244,15 @@ def bayes_lineage_probability(
                 aa_muts, pango_lin, lineage_count, datemin, datemax,
             )
             p_l_given_m = min(1.0, p_m_given_l * p_lineage / p_m)
-        except Exception:
+            res.append(p_l_given_m)
+
+            
+        except Exception as e:
             continue
 
-        weighted_sum += depth * p_l_given_m
-        total_depth += depth
-
-    if total_depth == 0:
+    if len(res) == 0:
         return float('nan')
-    return weighted_sum / total_depth
+    return max(res)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────

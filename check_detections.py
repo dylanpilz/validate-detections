@@ -215,8 +215,6 @@ def bayes_lineage_probability(
     datemax: str,
 ) -> float:
     """
-    Depth-weighted mean of P(L|M) across all covar clusters containing ≥1 LDM.
-
     P(L|M) = P(M|L) * P(L) / P(M)   [Bayes, mirrors validate_detects.ipynb]
 
     Returns nan when no LDM-containing clusters exist or all API calls fail.
@@ -239,15 +237,15 @@ def bayes_lineage_probability(
         try:
             p_m = get_p_mutations(aa_muts, datemin, datemax)
             if p_m <= 0:
+                print(f"    get_p_mutations returned 0 for {aa_muts} — skipping cluster")
                 continue
             p_m_given_l = get_p_mutations_given_lineage(
                 aa_muts, pango_lin, lineage_count, datemin, datemax,
             )
             p_l_given_m = min(1.0, p_m_given_l * p_lineage / p_m)
             res.append(p_l_given_m)
-
-            
         except Exception as e:
+            print(f"    API error for {pango_lin} {aa_muts}: {e}")
             continue
 
     if len(res) == 0:
@@ -257,54 +255,61 @@ def bayes_lineage_probability(
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-for file in sorted(os.listdir('samples')):
-    if not file.endswith('.csv'):
-        continue
+    for file in sorted(os.listdir('samples')):
+        if not file.endswith('.csv'):
+            continue
 
-    lineage = file.split('detections_')[1].split('.csv')[0]
-    pango_lin = to_pango(lineage)
-    print(f'Processing {lineage} ({pango_lin})')
+        lineage = file.split('detections_')[1].split('.csv')[0]
+        pango_lin = to_pango(lineage)
+        print(f'Processing {lineage} ({pango_lin})')
 
-    samples = pd.read_csv(f'samples/{file}')
+        samples = pd.read_csv(f'samples/{file}')
 
-    dates = pd.to_datetime(samples['collection_date_ww'], errors='coerce').dropna()
-    datemin = dates.min().strftime('%Y-%m-%d')
-    datemax = dates.max().strftime('%Y-%m-%d')
+        dates = pd.to_datetime(samples['collection_date_ww'], errors='coerce').dropna()
+        datemin = dates.min().strftime('%Y-%m-%d')
+        datemax = dates.max().strftime('%Y-%m-%d')
 
-    ldm_set = get_ldms(pango_lin)
-    p_lineage, lineage_count = get_lineage_prevalence(pango_lin, datemin, datemax)
-    print(f'  LDMs: {len(ldm_set)}  P(L): {p_lineage:.4f}  dates: {datemin} – {datemax}')
+        ldm_set = get_ldms(pango_lin)
+        os.makedirs('ldm', exist_ok=True)
+        with open(f'ldm/{lineage}_ldm.txt', 'w') as f:
+            f.write('\n'.join(sorted(ldm_set)))
+        p_lineage, lineage_count = get_lineage_prevalence(pango_lin, datemin, datemax)
+        print(f'  LDMs: {len(ldm_set)}  P(L): {p_lineage:.4f}  dates: {datemin} – {datemax}')
 
-    rows = []
-    for _, sample in samples.iterrows():
-        acc = sample['accession']
-        covar_path = f'covar/{acc}.covar.tsv'
-        if os.path.isfile(covar_path):
-            covariants = pd.read_csv(covar_path, sep='\t')
-            counts = count_lineage_clusters(covariants, ldm_set)
-            p_present = bayes_lineage_probability(
-                covariants, ldm_set, pango_lin, p_lineage, lineage_count, datemin, datemax,
-            )
-        else:
-            counts = {
-                'n_clusters_1_ldm': 0,
-                'cluster_depth_1_ldm': 0,
-                'n_clusters_2plus_ldm': 0,
-                'cluster_depth_2plus_ldm': 0,
-            }
-            p_present = float('nan')
-        rows.append({
-            'collection_date_ww': sample['collection_date_ww'],
-            'state': sample['state'],
-            'accession': acc,
-            **counts,
-            'p_lineage_present': p_present,
-        })
+        rows = []
+        for _, sample in samples.iterrows():
+            acc = sample['accession']
+            covar_path = f'covar/{acc}.covar.tsv'
+            if os.path.isfile(covar_path):
+                covariants = pd.read_csv(covar_path, sep='\t')
+                counts = count_lineage_clusters(covariants, ldm_set)
+                p_present = bayes_lineage_probability(
+                    covariants, ldm_set, pango_lin, p_lineage, lineage_count, datemin, datemax,
+                )
+            else:
+                counts = {
+                    'n_clusters_1_ldm': 0,
+                    'cluster_depth_1_ldm': 0,
+                    'n_clusters_2plus_ldm': 0,
+                    'cluster_depth_2plus_ldm': 0,
+                }
+                p_present = float('nan')
+            rows.append({
+                'collection_date_ww': sample['collection_date_ww'],
+                'state': sample['state'],
+                'accession': acc,
+                **counts,
+                'p_lineage_present': p_present,
+            })
 
-    out_name = file.replace('initial_', 'validated_')
-    pd.DataFrame(rows).to_csv(f'{OUTPUT_DIR}/{out_name}', index=True)
-    print(f'  → {OUTPUT_DIR}/{out_name}')
+        out_name = file.replace('initial_', 'validated_')
+        pd.DataFrame(rows).to_csv(f'{OUTPUT_DIR}/{out_name}', index=True)
+        print(f'  → {OUTPUT_DIR}/{out_name}')
 
-_save_caches()
+    _save_caches()
+
+if __name__ == "__main__":
+    main()

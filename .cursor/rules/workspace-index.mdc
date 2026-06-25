@@ -1,0 +1,37 @@
+---
+description: Workspace index and data layout for validate-detections
+alwaysApply: true
+---
+
+# validate-detections Workspace Index
+
+**Purpose:** Validates SARS-CoV-2 lineage detections from wastewater sequencing data. Confirms SRA samples carry lineage-defining mutations (LDMs) using covar haplotype data.
+
+## Lineages
+BA.2.75.X, BF.7.X, BQ.1.X, XBB.1.5.X, XBB.1.9.X
+
+## Data Layout
+
+| Path | Description |
+|------|-------------|
+| `check_detections.py` | Main script — reads `samples/`, `covar/`, `ldm/`; writes `validated/` |
+| `samples/initial_detections_<LINEAGE>.csv` | 50 SRA samples per lineage; columns: `collection_date_ww`, `state`, `accession` |
+| `ldm/<LINEAGE>_ldm.txt` | Lineage-defining mutations (one per line, e.g. `C2790T`); counts: BA.2.75.X=156, BF.7.X=30, BQ.1.X=105, XBB.1.5.X=159, XBB.1.9.X=193 |
+| `covar/<accession>.covar.tsv` | 234 per-sample haplotype files; columns: `nt_mutations`, `aa_mutations`, `cluster_depth`, `total_depth`, `frequency`, `coverage_start`, `coverage_end` |
+| `validated/validated_detections_<LINEAGE>.csv` | Output; adds `n_clusters_1_ldm`, `cluster_depth_1_ldm`, `n_clusters_2plus_ldm`, `cluster_depth_2plus_ldm`, `p_lineage_present` |
+| `lineages.yml` | YAML config for notebook/exploratory analysis |
+| `usher_barcodes.feather` | 4.8 MB UShER barcode matrix (Apache Arrow) |
+| `scripts/fetch_and_align_sra.sh` | Step 1: Download SRA FASTQs + align to reference |
+| `scripts/run_covar.sh` | Step 2: Run covar on aligned BAMs |
+
+## Validation Logic (`check_detections.py`)
+
+Clusters containing LDMs are tallied per sample:
+- **1 LDM match** → `n_clusters_1_ldm` / `cluster_depth_1_ldm`
+- **2+ LDM matches** → `n_clusters_2plus_ldm` / `cluster_depth_2plus_ldm`
+
+LDMs are loaded from `ldm/<LINEAGE>_ldm.txt` (not `lineage_def/` — that directory does not exist).
+
+## Environment
+
+Full pipeline requires the `freyja-sc2` micromamba environment (sra-tools, minimap2, samtools, covar) and the `freyja-global` repo for the reference FASTA (`Assets/NC_045512_Hu-1.fasta`).

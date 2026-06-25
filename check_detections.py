@@ -134,13 +134,12 @@ def get_p_mutations(muts: list, datemin: str, datemax: str) -> float:
     """P(M) — overall prevalence of this mutation set across all lineages."""
     key = (frozenset(muts), datemin, datemax)
     if key not in _pm_cache:
-        return 0.0 
-        # df = od.lineage_cl_prevalence(
-        #     '.', descendants=True, mutations=muts, location='USA',
-        #     datemin=datemin, datemax=datemax, lineage_key=lineage_key,
-        # )
-        # tc = float(df['total_count'].sum())
-        # _pm_cache[key] = float(df['lineage_count'].sum()) / tc if tc > 0 else 0.0
+        df = od.lineage_cl_prevalence(
+            '.', descendants=True, mutations=muts, location='USA',
+            datemin=datemin, datemax=datemax, lineage_key=lineage_key,
+        )
+        tc = float(df['total_count'].sum())
+        _pm_cache[key] = float(df['lineage_count'].sum()) / tc if tc > 0 else 0.0
     return _pm_cache[key]
 
 
@@ -215,7 +214,7 @@ def bayes_lineage_probability(
     datemax: str,
 ) -> float:
     """
-    P(L|M) = P(M|L) * P(L) / P(M)   [Bayes, mirrors validate_detects.ipynb]
+    P(L|M) = P(M|L) * P(L) / P(M)
 
     Returns nan when no LDM-containing clusters exist or all API calls fail.
     """
@@ -269,8 +268,8 @@ def main():
         samples = pd.read_csv(f'samples/{file}')
 
         dates = pd.to_datetime(samples['collection_date_ww'], errors='coerce').dropna()
-        datemin = dates.min().strftime('%Y-%m-%d')
-        datemax = dates.max().strftime('%Y-%m-%d')
+        datemin = (dates.min() - pd.DateOffset(months=3)).strftime('%Y-%m-%d')
+        datemax = (dates.max() + pd.DateOffset(months=3)).strftime('%Y-%m-%d')
 
         ldm_set = get_ldms(pango_lin)
         os.makedirs('ldm', exist_ok=True)

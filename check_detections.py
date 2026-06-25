@@ -9,7 +9,7 @@ from outbreak_tools import crumbs
 OUTPUT_DIR = 'validated'
 CACHE_FILE = '.api_cache.json'
 
-#authenticate_user.authenticate_new_user()
+authenticate_user.authenticate_new_user()
 lineage_key = crumbs.get_alias_key()
 
 # ── barcode + lineage hierarchy (local, no API) ───────────────────────────────
